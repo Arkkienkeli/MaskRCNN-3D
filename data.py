@@ -3,7 +3,7 @@ descr here: setting up the data
 """
 
 import os
-import skimage
+import skimage.io
 import numpy
 import config
 import utils

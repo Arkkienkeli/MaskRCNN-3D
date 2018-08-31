@@ -123,6 +123,7 @@ class Config(object):
     IMAGE_RESIZE_MODE = "square"
     IMAGE_MIN_DIM = 800
     IMAGE_MAX_DIM = 1024
+    IMAGE_STACK_DIM = 64
     # Minimum scaling ratio. Checked after MIN_IMAGE_DIM and can force further
     # up scaling. For example, if set to 2 then images are scaled up to double
     # the width and height, or more, even if MIN_IMAGE_DIM doesn't require it.
@@ -210,13 +211,14 @@ class Config(object):
 
         # Input image size
         if self.IMAGE_RESIZE_MODE == "crop":
-            self.IMAGE_SHAPE = np.array([self.IMAGE_MIN_DIM, self.IMAGE_MIN_DIM, 3])
+            self.IMAGE_SHAPE = np.array([self.IMAGE_MIN_DIM, self.IMAGE_MIN_DIM, self.IMAGE_STACK_DIM, 3])
         else:
-            self.IMAGE_SHAPE = np.array([self.IMAGE_MAX_DIM, self.IMAGE_MAX_DIM, 3])
+            self.IMAGE_SHAPE = np.array([self.IMAGE_MAX_DIM, self.IMAGE_MAX_DIM, self.IMAGE_STACK_DIM, 3])
 
         # Image meta data length
         # See compose_image_meta() for details
-        self.IMAGE_META_SIZE = 1 + 3 + 3 + 4 + 1 + self.NUM_CLASSES
+        # FOR 3D THIS REQUIRED SOME MODIFICATIONS
+        self.IMAGE_META_SIZE = 1 + 4 + 4 + 6 + 1 + self.NUM_CLASSES
 
     def display(self):
         """Display Configuration values."""
