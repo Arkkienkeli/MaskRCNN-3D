@@ -7,7 +7,7 @@ import os
 import random
 import json
 import data
-import model
+import model_2D
 
 print("Usage", sys.argv[0], "settings.json")
 
@@ -96,13 +96,13 @@ class MrcnnTrain:
         # TODO Load and display random samples
 
         # Create model in training mode
-        mdl = model.MaskRCNN_3D(mode="training", config=config, model_dir=os.path.dirname(outModelPath))
+        mdl = model_2D.MaskRCNN_3D(mode="training", config=config, model_dir=os.path.dirname(outModelPath))
 
-#        if blankInput:
-#            mdl.load_weights(inModelPath, by_name=True,
-#                             exclude=["mrcnn_class_logits", "mrcnn_bbox_fc", "mrcnn_bbox", "mrcnn_mask"])
-#        else:
-#            mdl.load_weights(inModelPath, by_name=True)
+        if blankInput:
+            mdl.load_weights(inModelPath, by_name=True,
+                             exclude=["mrcnn_class_logits", "mrcnn_bbox_fc", "mrcnn_bbox", "mrcnn_mask"])
+        else:
+            mdl.load_weights(inModelPath, by_name=True)
 
         allcount = 0
         for epochgroup in self.__mParams["epoch_groups"]:
@@ -110,11 +110,11 @@ class MrcnnTrain:
             if epochs < 1:
                 continue
             allcount += epochs
-#            mdl.train(dataset_train,
-#                      dataset_val,
-#                      learning_rate=float(epochgroup["learning_rate"]),
-#                      epochs=allcount,
-#                      layers=epochgroup["layers"])
+            mdl.train(dataset_train,
+                      dataset_val,
+                      learning_rate=float(epochgroup["learning_rate"]),
+                      epochs=allcount,
+                      layers=epochgroup["layers"])
 
 #        mdl.keras_model.save_weights(outModelPath)
 

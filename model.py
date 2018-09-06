@@ -19,6 +19,7 @@ import tensorflow as tf
 import keras
 import keras.backend as K
 import keras.layers as KL
+import keras.engine as KE
 import keras.models as KM
 import utils
 
@@ -184,6 +185,141 @@ def resnet_graph(input_image, architecture, stage5=False, train_bn=True):
 ############################################################
 
 
+def apply_box_deltas_graph(boxes, deltas):
+    """Applies the given deltas to the given boxes.
+    boxes: [N, (y1, x1, y2, x2)] boxes to update
+    deltas: [N, (dy, dx, log(dh), log(dw))] refinements to apply
+    """
+    # Convert to y, x, h, w
+    print(boxes)
+    print(deltas)
+    height = boxes[:, 3] - boxes[:, 0]
+    width = boxes[:, 4] - boxes[:, 1]
+    depth = boxes[:, 5] - boxes[:, 2]
+    center_y = boxes[:, 0] + 0.5 * height
+    center_x = boxes[:, 1] + 0.5 * width
+    center_z = boxes[:, 2] + 0.5 * depth
+    # Apply deltas
+    print(deltas[:, 0])
+    print(height)
+    center_y += (tf.cast(deltas[:, 0], tf.float64)) * height
+    center_x += (tf.cast(deltas[:, 1], tf.float64)) * width
+    center_z += (tf.cast(deltas[:, 2], tf.float64)) * depth
+    height *= tf.exp(deltas[:, 3])
+    width *= tf.exp(deltas[:, 4])
+    depth *= tf.exp(deltas[:, 5])
+    # Convert back to y1, x1, y2, x2
+    y1 = center_y - 0.5 * height
+    x1 = center_x - 0.5 * width
+    z1 = center_z - 0.5 * depth
+    y2 = y1 + height
+    x2 = x1 + width
+    z2 = z1 + depth
+    result = tf.stack([y1, x1, z1, y2, x2, z2], axis=1, name="apply_box_deltas_out")
+    return result
+
+def clip_boxes_graph(boxes, window):
+    """
+    boxes: [N, (y1, x1, y2, x2)]
+    window: [4] in the form y1, x1, y2, x2
+    """
+    # Split
+    wy1, wx1, wy2, wx2 = tf.split(window, 4)
+    y1, x1, y2, x2 = tf.split(boxes, 4, axis=1)
+    # Clip
+    y1 = tf.maximum(tf.minimum(y1, wy2), wy1)
+    x1 = tf.maximum(tf.minimum(x1, wx2), wx1)
+    y2 = tf.maximum(tf.minimum(y2, wy2), wy1)
+    x2 = tf.maximum(tf.minimum(x2, wx2), wx1)
+    clipped = tf.concat([y1, x1, y2, x2], axis=1, name="clipped_boxes")
+    clipped.set_shape((clipped.shape[0], 4))
+    return clipped
+
+class ProposalLayer(KE.Layer):
+    """Receives anchor scores and selects a subset to pass as proposals
+    to the second stage. Filtering is done based on anchor scores and
+    non-max suppression to remove overlaps. It also applies bounding
+    box refinement deltas to anchors.
+
+    Inputs:
+        rpn_probs: [batch, anchors, (bg prob, fg prob)]
+        rpn_bbox: [batch, anchors, (dy, dx, log(dh), log(dw))]
+        anchors: [batch, (y1, x1, y2, x2)] anchors in normalized coordinates
+
+    Returns:
+        Proposals in normalized coordinates [batch, rois, (y1, x1, y2, x2)]
+    """
+
+    def __init__(self, proposal_count, nms_threshold, config=None, **kwargs):
+        super(ProposalLayer, self).__init__(**kwargs)
+        self.config = config
+        self.proposal_count = proposal_count
+        self.nms_threshold = nms_threshold
+
+    def call(self, inputs):
+        # Box Scores. Use the foreground class confidence. [Batch, num_rois, 1]
+        scores = inputs[0][:, :, 1]
+        # Box deltas [batch, num_rois, 4]
+        deltas = inputs[1]
+        print("delt")
+        print(deltas)
+        deltas = deltas * np.reshape(self.config.RPN_BBOX_STD_DEV, [1, 1, 4])
+        print("delt2")
+        print(deltas)
+        # Anchors
+        anchors = inputs[2]
+
+        # Improve performance by trimming to top anchors by score
+        # and doing the rest on the smaller subset.
+        pre_nms_limit = tf.minimum(6000, tf.shape(anchors)[1])
+        ix = tf.nn.top_k(scores, pre_nms_limit, sorted=True,
+                         name="top_anchors").indices
+        scores = utils.batch_slice([scores, ix], lambda x, y: tf.gather(x, y),
+                                   self.config.IMAGES_PER_GPU)
+        deltas = utils.batch_slice([deltas, ix], lambda x, y: tf.gather(x, y),
+                                   self.config.IMAGES_PER_GPU)
+        pre_nms_anchors = utils.batch_slice([anchors, ix], lambda a, x: tf.gather(a, x),
+                                    self.config.IMAGES_PER_GPU,
+                                    names=["pre_nms_anchors"])
+        print("delt3", deltas)
+        print("preanch", pre_nms_anchors)
+        # Apply deltas to anchors to get refined anchors.
+        # [batch, N, (y1, x1, y2, x2)]
+        boxes = utils.batch_slice([pre_nms_anchors, deltas],
+                                  lambda x, y: apply_box_deltas_graph(x, y),
+                                  self.config.IMAGES_PER_GPU,
+                                  names=["refined_anchors"])
+
+        # Clip to image boundaries. Since we're in normalized coordinates,
+        # clip to 0..1 range. [batch, N, (y1, x1, y2, x2)]
+        window = np.array([0, 0, 1, 1], dtype=np.float32)
+        boxes = utils.batch_slice(boxes,
+                                  lambda x: clip_boxes_graph(x, window),
+                                  self.config.IMAGES_PER_GPU,
+                                  names=["refined_anchors_clipped"])
+
+        # Filter out small boxes
+        # According to Xinlei Chen's paper, this reduces detection accuracy
+        # for small objects, so we're skipping it.
+
+        # Non-max suppression
+        def nms(boxes, scores):
+            indices = tf.image.non_max_suppression(
+                boxes, scores, self.proposal_count,
+                self.nms_threshold, name="rpn_non_max_suppression")
+            proposals = tf.gather(boxes, indices)
+            # Pad if needed
+            padding = tf.maximum(self.proposal_count - tf.shape(proposals)[0], 0)
+            proposals = tf.pad(proposals, [(0, padding), (0, 0)])
+            return proposals
+        proposals = utils.batch_slice([boxes, scores], nms,
+                                      self.config.IMAGES_PER_GPU)
+        return proposals
+
+    def compute_output_shape(self, input_shape):
+        return (None, self.proposal_count, 4)
+
+
 ############################################################
 #  4. ROIAlign Layer
 ############################################################
@@ -203,6 +339,70 @@ def resnet_graph(input_image, architecture, stage5=False, train_bn=True):
 #  7. Region Proposal Network (RPN)
 ############################################################
 
+def rpn_graph(feature_map, anchors_per_location, anchor_stride):
+    """Builds the computation graph of Region Proposal Network.
+
+    feature_map: backbone features [batch, height, width, depth]
+    anchors_per_location: number of anchors per pixel in the feature map
+    anchor_stride: Controls the density of anchors. Typically 1 (anchors for
+                   every pixel in the feature map), or 2 (every other pixel).
+
+    Returns:
+        rpn_logits: [batch, H, W, 2] Anchor classifier logits (before softmax)
+        rpn_probs: [batch, H, W, 2] Anchor classifier probabilities.
+        rpn_bbox: [batch, H, W, (dy, dx, log(dh), log(dw))] Deltas to be
+                  applied to anchors.
+    """
+    # TODO: check if stride of 2 causes alignment issues if the feature map
+    # is not even.
+    # Shared convolutional base of the RPN
+    shared = KL.Conv3D(512, (3, 3, 3), padding='same', activation='relu',
+                       strides=anchor_stride,
+                       name='rpn_conv_shared')(feature_map)
+
+    # Anchor Score. [batch, height, width, anchors per location * 2].
+    x = KL.Conv3D(2 * anchors_per_location, (1, 1, 1), padding='valid',
+                  activation='linear', name='rpn_class_raw')(shared)
+
+    # Reshape to [batch, anchors, 2]
+    rpn_class_logits = KL.Lambda(
+        lambda t: tf.reshape(t, [tf.shape(t)[0], -1, 2]))(x)
+
+    # Softmax on last dimension of BG/FG.
+    rpn_probs = KL.Activation(
+        "softmax", name="rpn_class_xxx")(rpn_class_logits)
+
+    # Bounding box refinement. [batch, H, W, anchors per location, depth]
+    # where depth is [x, y, log(w), log(h)]
+    x = KL.Conv3D(anchors_per_location * 4, (1, 1, 1), padding="valid",
+                  activation='linear', name='rpn_bbox_pred')(shared)
+
+    # Reshape to [batch, anchors, 4]
+    rpn_bbox = KL.Lambda(lambda t: tf.reshape(t, [tf.shape(t)[0], -1, 4]))(x)
+
+    return [rpn_class_logits, rpn_probs, rpn_bbox]
+
+
+def build_rpn_model(anchor_stride, anchors_per_location, depth):
+    """Builds a Keras model of the Region Proposal Network.
+    It wraps the RPN graph so it can be used multiple times with shared
+    weights.
+
+    anchors_per_location: number of anchors per pixel in the feature map
+    anchor_stride: Controls the density of anchors. Typically 1 (anchors for
+                   every pixel in the feature map), or 2 (every other pixel).
+    depth: Depth of the backbone feature map.
+
+    Returns a Keras Model object. The model outputs, when called, are:
+    rpn_logits: [batch, H, W, 2] Anchor classifier logits (before softmax)
+    rpn_probs: [batch, W, W, 2] Anchor classifier probabilities.
+    rpn_bbox: [batch, H, W, (dy, dx, log(dh), log(dw))] Deltas to be
+                applied to anchors.
+    """
+    input_feature_map = KL.Input(shape=[None, None, None, depth],
+                                 name="input_rpn_feature_map")
+    outputs = rpn_graph(input_feature_map, anchors_per_location, anchor_stride)
+    return KM.Model([input_feature_map], outputs, name="rpn_model")
 
 ############################################################
 #  8. Feature Pyramid Network Heads
@@ -342,7 +542,7 @@ class MaskRCNN_3D():
             anchors = KL.Lambda(lambda x: tf.Variable(anchors), name="anchors")(input_image)
         else:
             anchors = input_anchors
-        """
+
         # RPN Model
         rpn = build_rpn_model(config.RPN_ANCHOR_STRIDE,
                               len(config.RPN_ANCHOR_RATIOS), config.TOP_DOWN_PYRAMID_SIZE)
@@ -366,12 +566,14 @@ class MaskRCNN_3D():
         # and zero padded.
         proposal_count = config.POST_NMS_ROIS_TRAINING if mode == "training"\
             else config.POST_NMS_ROIS_INFERENCE
+
         rpn_rois = ProposalLayer(
             proposal_count=proposal_count,
             nms_threshold=config.RPN_NMS_THRESHOLD,
             name="ROI",
             config=config)([rpn_class, rpn_bbox, anchors])
-""" """       if mode == "training":
+        """
+        if mode == "training":
             # Class ID mask to mark class IDs supported by the dataset the image
             # came from.
             active_class_ids = KL.Lambda(
@@ -435,41 +637,43 @@ class MaskRCNN_3D():
                        rpn_rois, output_rois,
                        rpn_class_loss, rpn_bbox_loss, class_loss, bbox_loss, mask_loss]
             model = KM.Model(inputs, outputs, name='mask_rcnn')
-"""
- #       else:
- #           # Network Heads
- #           # Proposal classifier and BBox regressor heads
- #           mrcnn_class_logits, mrcnn_class, mrcnn_bbox =\
- #               fpn_classifier_graph(rpn_rois, mrcnn_feature_maps, input_image_meta,
- #                                    config.POOL_SIZE, config.NUM_CLASSES,
- #                                    train_bn=config.TRAIN_BN,
- #                                    fc_layers_size=config.FPN_CLASSIF_FC_LAYERS_SIZE)
+        """ """
+        else:
+            # Network Heads
+            # Proposal classifier and BBox regressor heads
+            mrcnn_class_logits, mrcnn_class, mrcnn_bbox =\
+                fpn_classifier_graph(rpn_rois, mrcnn_feature_maps, input_image_meta,
+                                     config.POOL_SIZE, config.NUM_CLASSES,
+                                     train_bn=config.TRAIN_BN,
+                                     fc_layers_size=config.FPN_CLASSIF_FC_LAYERS_SIZE)
 
- #           # Detections
- #           # output is [batch, num_detections, (y1, x1, y2, x2, class_id, score)] in
- #           # normalized coordinates
- #           detections = DetectionLayer(config, name="mrcnn_detection")(
- #               [rpn_rois, mrcnn_class, mrcnn_bbox, input_image_meta])
+            # Detections
+            # output is [batch, num_detections, (y1, x1, y2, x2, class_id, score)] in
+            # normalized coordinates
+            detections = DetectionLayer(config, name="mrcnn_detection")(
+                [rpn_rois, mrcnn_class, mrcnn_bbox, input_image_meta])
 
- #           # Create masks for detections
- #           detection_boxes = KL.Lambda(lambda x: x[..., :4])(detections)
- #           mrcnn_mask = build_fpn_mask_graph(detection_boxes, mrcnn_feature_maps,
- #                                             input_image_meta,
- #                                             config.MASK_POOL_SIZE,
- #                                             config.NUM_CLASSES,
- #                                             train_bn=config.TRAIN_BN)
+            # Create masks for detections
+            detection_boxes = KL.Lambda(lambda x: x[..., :4])(detections)
+            mrcnn_mask = build_fpn_mask_graph(detection_boxes, mrcnn_feature_maps,
+                                              input_image_meta,
+                                              config.MASK_POOL_SIZE,
+                                              config.NUM_CLASSES,
+                                              train_bn=config.TRAIN_BN)
 
- #           model = KM.Model([input_image, input_image_meta, input_anchors],
- #                            [detections, mrcnn_class, mrcnn_bbox,
- #                                mrcnn_mask, rpn_rois, rpn_class, rpn_bbox],
- #                            name='mask_rcnn')
+            model = KM.Model([input_image, input_image_meta, input_anchors],
+                             [detections, mrcnn_class, mrcnn_bbox,
+                                 mrcnn_mask, rpn_rois, rpn_class, rpn_bbox],
+                             name='mask_rcnn')
 
- #       # Add multi-GPU support.
- #       if config.GPU_COUNT > 1:
- #           from mrcnn.parallel_model import ParallelModel
- #           model = ParallelModel(model, config.GPU_COUNT)
+        # Add multi-GPU support.
+        if config.GPU_COUNT > 1:
+            from mrcnn.parallel_model import ParallelModel
+            model = ParallelModel(model, config.GPU_COUNT)
 
-        #return model
+        return model
+
+    """
 
     def load_weights(self, filepath, by_name=False, exclude=None):
         """Modified version of the corresponding Keras function with
@@ -534,7 +738,7 @@ class MaskRCNN_3D():
             # TODO: Remove this after the notebook are refactored to not use it
             self.anchors = a
             # Normalize coordinates
-            self._anchor_cache[tuple(image_shape)] = utils.norm_boxes(a, image_shape[:3])
+            self._anchor_cache[tuple(image_shape)] = a #utils.norm_boxes(a, image_shape[:3])
         return self._anchor_cache[tuple(image_shape)]
 
     def set_log_dir(self, model_path=None):

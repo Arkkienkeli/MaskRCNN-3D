@@ -5,11 +5,11 @@ descr here: setting up the data
 import os
 import skimage.io
 import numpy
-import config
-import utils
+import config_2D
+import utils_2D
 
 
-class NucleiConfig(config.Config):
+class NucleiConfig(config_2D.Config):
     NAME = "nuclei"
     GPU_COUNT = 1
     IMAGES_PER_GPU = 1
@@ -23,7 +23,7 @@ class NucleiConfig(config.Config):
     #RPN_NMS_THRESHOLD = 0.55
 
 
-class NucleiDataset(utils.Dataset):
+class NucleiDataset(utils_2D.Dataset):
 
     def initialize(self, pImagesAndMasks, pAugmentationLevel = 0):
         self.add_class("nuclei", 1, "nucleus")

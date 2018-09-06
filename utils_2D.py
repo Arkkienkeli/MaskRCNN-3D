@@ -5,6 +5,33 @@ utils descr here
 import numpy as np
 import tensorflow as tf
 
+
+def box_refinement_graph(box, gt_box):
+    """Compute refinement needed to transform box to gt_box.
+    box and gt_box are [N, (y1, x1, y2, x2)]
+    """
+    box = tf.cast(box, tf.float32)
+    gt_box = tf.cast(gt_box, tf.float32)
+
+    height = box[:, 2] - box[:, 0]
+    width = box[:, 3] - box[:, 1]
+    center_y = box[:, 0] + 0.5 * height
+    center_x = box[:, 1] + 0.5 * width
+
+    gt_height = gt_box[:, 2] - gt_box[:, 0]
+    gt_width = gt_box[:, 3] - gt_box[:, 1]
+    gt_center_y = gt_box[:, 0] + 0.5 * gt_height
+    gt_center_x = gt_box[:, 1] + 0.5 * gt_width
+
+    dy = (gt_center_y - center_y) / height
+    dx = (gt_center_x - center_x) / width
+    dh = tf.log(gt_height / height)
+    dw = tf.log(gt_width / width)
+
+    result = tf.stack([dy, dx, dh, dw], axis=1)
+    return result
+
+
 ############################################################
 #  Dataset
 ############################################################
@@ -78,7 +105,7 @@ class Dataset(object):
         self.class_from_source_map = {"{}.{}".format(info['source'], info['id']): id
                                       for info, id in zip(self.class_info, self.class_ids)}
         self.image_from_source_map = {"{}.{}".format(info['source'], info['id']): id
-                                      for info, id in zip(self.image_info, self._image_ids)} # itt baj volt az alahuzas nelkul
+                                      for info, id in zip(self.image_info, self._image_ids)}
 
         # Map sources to class_ids they support
         self.sources = list(set([i['source'] for i in self.class_info]))
@@ -92,21 +119,12 @@ class Dataset(object):
                 if i == 0 or source == info['source']:
                     self.source_class_ids[source].append(i)
 
-        @property
-        def image_ids(self):
-            return self._image_ids
-
-
 ############################################################
 #  Anchors
 ############################################################
 
+
 def generate_anchors(scales, ratios, shape, feature_stride, anchor_stride):
-
-
-    # TODO correct this function
-
-
     """
     scales: 1D array of anchor sizes in pixels. Example: [32, 64, 128]
     ratios: 1D array of anchor ratios of width/height. Example: [0.5, 1, 2]
@@ -124,28 +142,24 @@ def generate_anchors(scales, ratios, shape, feature_stride, anchor_stride):
     # Enumerate heights and widths from scales and ratios
     heights = scales / np.sqrt(ratios)
     widths = scales * np.sqrt(ratios)
-    z_depth = scales * ratios
 
     # Enumerate shifts in feature space
     shifts_y = np.arange(0, shape[0], anchor_stride) * feature_stride
     shifts_x = np.arange(0, shape[1], anchor_stride) * feature_stride
-    shifts_z = np.arange(0, shape[2], anchor_stride) * feature_stride
-    shifts_x, shifts_y, shifts_z = np.meshgrid(shifts_x, shifts_y, shifts_z)
+    shifts_x, shifts_y = np.meshgrid(shifts_x, shifts_y)
 
     # Enumerate combinations of shifts, widths, and heights
     box_widths, box_centers_x = np.meshgrid(widths, shifts_x)
     box_heights, box_centers_y = np.meshgrid(heights, shifts_y)
-    box_depths, box_centers_z = np.meshgrid(z_depth, shifts_z)
 
     # Reshape to get a list of (y, x) and a list of (h, w)
     box_centers = np.stack(
-        [box_centers_y, box_centers_x, box_centers_z], axis=2) #.reshape([-1, 2]) # TODO this reshape must be wrong
-    box_sizes = np.stack([box_heights, box_widths, box_depths], axis=2) #.reshape([-1, 2])
+        [box_centers_y, box_centers_x], axis=2).reshape([-1, 2])
+    box_sizes = np.stack([box_heights, box_widths], axis=2).reshape([-1, 2])
 
     # Convert to corner coordinates (y1, x1, y2, x2)
     boxes = np.concatenate([box_centers - 0.5 * box_sizes,
                             box_centers + 0.5 * box_sizes], axis=1)
-
     return boxes
 
 
@@ -173,23 +187,6 @@ def generate_pyramid_anchors(scales, ratios, feature_shapes, feature_strides,
 #  Miscellaneus
 ############################################################
 
-
-def norm_boxes(boxes, shape):
-    """Converts boxes from pixel coordinates to normalized coordinates.
-    boxes: [N, (y1, x1, y2, x2)] in pixel coordinates
-    shape: [..., (height, width)] in pixels
-
-    Note: In pixel coordinates (y2, x2) is outside the box. But in normalized
-    coordinates it's inside the box.
-
-    Returns:
-        [N, (y1, x1, y2, x2)] in normalized coordinates
-    """
-    h, w, z = shape
-    scale = np.array([h - 1, w - 1, z - 1, h - 1, w - 1, z - 1])
-    #shift = np.array([0, 0, 1, 1, 1, 1, 0, 0]) # TODO these number might be incorrect
-    #print(boxes - shift)
-    return np.divide(boxes, scale).astype(np.float32)
 
 # ## Batch Slicing
 # Some custom layers support a batch size of 1 only, and require a lot of work
@@ -233,3 +230,23 @@ def batch_slice(inputs, graph_fn, batch_size, names=None):
         result = result[0]
 
     return result
+
+def norm_boxes(boxes, shape):
+    """Converts boxes from pixel coordinates to normalized coordinates.
+    boxes: [N, (y1, x1, y2, x2)] in pixel coordinates
+    shape: [..., (height, width)] in pixels
+
+    Note: In pixel coordinates (y2, x2) is outside the box. But in normalized
+    coordinates it's inside the box.
+
+    Returns:
+        [N, (y1, x1, y2, x2)] in normalized coordinates
+    """
+    print('++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++')
+    print(boxes.shape)
+    h, w = shape
+    scale = np.array([h - 1, w - 1, h - 1, w - 1])
+    shift = np.array([0, 0, 1, 1])
+    return np.divide((boxes - shift), scale).astype(np.float32)
+
+
