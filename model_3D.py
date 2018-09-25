@@ -21,11 +21,26 @@ import keras.backend as K
 import keras.layers as KL
 import keras.engine as KE
 import keras.models as KM
-import utils
+import utils_3D
 
 ############################################################
 #  1. Utility Functions
 ############################################################
+
+
+def log(text, array=None):
+    """Prints a text message. And, optionally, if a Numpy array is provided it
+    prints it's shape, min, and max values.
+    """
+    if array is not None:
+        text = text.ljust(25)
+        text += ("shape: {:20}  min: {:10.5f}  max: {:10.5f}  {}".format(
+            str(array.shape),
+            array.min() if array.size else "",
+            array.max() if array.size else "",
+            array.dtype))
+    print(text)
+
 
 class BatchNorm(KL.BatchNormalization):
     """Extends the Keras BatchNormalization class to allow a central place
@@ -274,29 +289,29 @@ class ProposalLayer(KE.Layer):
         pre_nms_limit = tf.minimum(6000, tf.shape(anchors)[1])
         ix = tf.nn.top_k(scores, pre_nms_limit, sorted=True,
                          name="top_anchors").indices
-        scores = utils.batch_slice([scores, ix], lambda x, y: tf.gather(x, y),
-                                   self.config.IMAGES_PER_GPU)
-        deltas = utils.batch_slice([deltas, ix], lambda x, y: tf.gather(x, y),
-                                   self.config.IMAGES_PER_GPU)
-        pre_nms_anchors = utils.batch_slice([anchors, ix], lambda a, x: tf.gather(a, x),
-                                    self.config.IMAGES_PER_GPU,
-                                    names=["pre_nms_anchors"])
+        scores = utils_3D.batch_slice([scores, ix], lambda x, y: tf.gather(x, y),
+                                      self.config.IMAGES_PER_GPU)
+        deltas = utils_3D.batch_slice([deltas, ix], lambda x, y: tf.gather(x, y),
+                                      self.config.IMAGES_PER_GPU)
+        pre_nms_anchors = utils_3D.batch_slice([anchors, ix], lambda a, x: tf.gather(a, x),
+                                               self.config.IMAGES_PER_GPU,
+                                               names=["pre_nms_anchors"])
         print("delt3", deltas)
         print("preanch", pre_nms_anchors)
         # Apply deltas to anchors to get refined anchors.
         # [batch, N, (y1, x1, y2, x2)]
-        boxes = utils.batch_slice([pre_nms_anchors, deltas],
-                                  lambda x, y: apply_box_deltas_graph(x, y),
-                                  self.config.IMAGES_PER_GPU,
-                                  names=["refined_anchors"])
+        boxes = utils_3D.batch_slice([pre_nms_anchors, deltas],
+                                     lambda x, y: apply_box_deltas_graph(x, y),
+                                     self.config.IMAGES_PER_GPU,
+                                     names=["refined_anchors"])
 
         # Clip to image boundaries. Since we're in normalized coordinates,
         # clip to 0..1 range. [batch, N, (y1, x1, y2, x2)]
         window = np.array([0, 0, 1, 1], dtype=np.float32)
-        boxes = utils.batch_slice(boxes,
-                                  lambda x: clip_boxes_graph(x, window),
-                                  self.config.IMAGES_PER_GPU,
-                                  names=["refined_anchors_clipped"])
+        boxes = utils_3D.batch_slice(boxes,
+                                     lambda x: clip_boxes_graph(x, window),
+                                     self.config.IMAGES_PER_GPU,
+                                     names=["refined_anchors_clipped"])
 
         # Filter out small boxes
         # According to Xinlei Chen's paper, this reduces detection accuracy
@@ -312,8 +327,8 @@ class ProposalLayer(KE.Layer):
             padding = tf.maximum(self.proposal_count - tf.shape(proposals)[0], 0)
             proposals = tf.pad(proposals, [(0, padding), (0, 0)])
             return proposals
-        proposals = utils.batch_slice([boxes, scores], nms,
-                                      self.config.IMAGES_PER_GPU)
+        proposals = utils_3D.batch_slice([boxes, scores], nms,
+                                         self.config.IMAGES_PER_GPU)
         return proposals
 
     def compute_output_shape(self, input_shape):
@@ -727,7 +742,7 @@ class MaskRCNN_3D():
             self._anchor_cache = {}
         if not tuple(image_shape) in self._anchor_cache:
             # Generate Anchors
-            a = utils.generate_pyramid_anchors(
+            a = utils_3D.generate_pyramid_anchors(
                 self.config.RPN_ANCHOR_SCALES,
                 self.config.RPN_ANCHOR_RATIOS,
                 backbone_shapes,

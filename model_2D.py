@@ -850,7 +850,6 @@ def rpn_graph(feature_map, anchors_per_location, anchor_stride):
     # TODO: check if stride of 2 causes alignment issues if the feature map
     # is not even.
     # Shared convolutional base of the RPN
-    print(feature_map.shape)
     shared = KL.Conv2D(512, (3, 3), padding='same', activation='relu',
                        strides=anchor_stride,
                        name='rpn_conv_shared')(feature_map)
@@ -1707,6 +1706,7 @@ def data_generator(dataset, config, shuffle=True, augment=False, augmentation=No
 
             # Get GT bounding boxes and masks for image.
             image_id = image_ids[image_index]
+            print("image: ", image_id)
 
             # If the image source is not to be augmented pass None as augmentation
             if dataset.image_info[image_id]['source'] in no_augmentation_sources:
@@ -1723,6 +1723,7 @@ def data_generator(dataset, config, shuffle=True, augment=False, augmentation=No
             # Skip images that have no instances. This can happen in cases
             # where we train on a subset of classes and the image doesn't
             # have any of the classes we care about.
+            print("class ids: ", gt_class_ids)
             if not np.any(gt_class_ids > 0):
                 continue
 
@@ -1809,7 +1810,6 @@ def data_generator(dataset, config, shuffle=True, augment=False, augmentation=No
                             batch_mrcnn_class_ids, -1)
                         outputs.extend(
                             [batch_mrcnn_class_ids, batch_mrcnn_bbox, batch_mrcnn_mask])
-
                 yield inputs, outputs
 
                 # start a new batch
@@ -1976,7 +1976,7 @@ class MaskRCNN_3D():
             name="ROI",
             config=config)([rpn_class, rpn_bbox, anchors])
 
-        print(rpn_rois)
+        print("rpn rois: ", rpn_rois)
 
 
         if mode == "training":
@@ -2044,8 +2044,8 @@ class MaskRCNN_3D():
                        rpn_class_loss, rpn_bbox_loss, class_loss, bbox_loss, mask_loss]
             model = KM.Model(inputs, outputs, name='mask_rcnn')
 
-        return model
-        """
+            return model
+
         else:
             # Network Heads
             # Proposal classifier and BBox regressor heads
@@ -2075,12 +2075,12 @@ class MaskRCNN_3D():
                              name='mask_rcnn')
 
         # Add multi-GPU support.
-        if config.GPU_COUNT > 1:
-            from mrcnn.parallel_model import ParallelModel
-            model = ParallelModel(model, config.GPU_COUNT)
+        #if config.GPU_COUNT > 1:
+        #    from mrcnn.parallel_model import ParallelModel
+        #    model = ParallelModel(model, config.GPU_COUNT)
 
         return model
-    """
+
 
 
     def find_last(self):
@@ -2135,7 +2135,6 @@ class MaskRCNN_3D():
         # In multi-GPU training, we wrap the model. Get layers
         # of the inner model because they have the weights.
         keras_model = self.keras_model
-        print(keras_model)
         layers = keras_model.inner_model.layers if hasattr(keras_model, "inner_model") \
             else keras_model.layers
 
@@ -2236,7 +2235,6 @@ class MaskRCNN_3D():
         for layer in layers:
             # Is the layer a model?
             if layer.__class__.__name__ == 'Model':
-                print("In model: ", layer.name)
                 self.set_trainable(
                     layer_regex, keras_model=layer, indent=indent + 4)
                 continue
@@ -2347,7 +2345,6 @@ class MaskRCNN_3D():
         }
         if layers in layer_regex.keys():
             layers = layer_regex[layers]
-        print(layers)
         # Data generators
         train_generator = data_generator(train_dataset, self.config, shuffle=True,
                                          augmentation=augmentation,
@@ -2371,7 +2368,6 @@ class MaskRCNN_3D():
         # Train
         log("\nStarting at epoch {}. LR={}\n".format(self.epoch, learning_rate))
         log("Checkpoint Path: {}".format(self.checkpoint_path))
-        print("...",layers)
         self.set_trainable(layers)
         self.compile(learning_rate, self.config.LEARNING_MOMENTUM)
 
@@ -2393,7 +2389,7 @@ class MaskRCNN_3D():
             validation_steps=self.config.VALIDATION_STEPS,
             max_queue_size=100,
             workers=workers,
-            use_multiprocessing=True,
+            use_multiprocessing=False,
         )
         self.epoch = max(self.epoch, epochs)
 

@@ -16,7 +16,7 @@ if [ -z "$1" ]
 fi
 
 # training
-python3 train.py $1
+python3 train_3D.py $1
 if [ $? -ne 0 ]
 then
     echo ERROR: "Error during training"
